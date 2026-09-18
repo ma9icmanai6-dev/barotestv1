@@ -67,8 +67,8 @@ export default function App() {
     });
   };
 
-  // Fetch real weather data
-  const fetchWeatherData = async (loc: LocationItem, isReal = false, isBackground = false) => {
+  // Fetch real weather data with automatic retry and offline cache recovery
+  const fetchWeatherData = async (loc: LocationItem, isReal = false, isBackground = false, retryCount = 0) => {
     if (!isBackground) {
       setLoading(true);
     }
@@ -89,6 +89,14 @@ export default function App() {
       const data: WeatherMetrics = await res.json();
       setWeather(data);
 
+      // Save to local storage for offline and instant reconnect resilience
+      try {
+        localStorage.setItem(
+          'cached_weather_last',
+          JSON.stringify({ loc, data, time: Date.now() })
+        );
+      } catch {}
+
       const scores = PainCalculator.calculateGranularPain(data);
       setPainScores(scores);
 
@@ -97,8 +105,32 @@ export default function App() {
         voiceService.readForecastOnLoad(loc.name, data, scores);
       }
     } catch (err: any) {
-      console.error('Failed to load weather data:', err);
-      setError('Unable to load current weather. Please check your connection or try again.');
+      console.warn('Failed to load weather data:', err);
+
+      // Auto-retry once after 1.5 seconds if first attempt failed
+      if (retryCount === 0) {
+        setTimeout(() => {
+          fetchWeatherData(loc, isReal, isBackground, 1);
+        }, 1500);
+        return;
+      }
+
+      // Offline / cached recovery
+      const savedBackup = localStorage.getItem('cached_weather_last');
+      if (savedBackup) {
+        try {
+          const parsed = JSON.parse(savedBackup);
+          if (parsed?.data) {
+            setWeather(parsed.data);
+            const scores = PainCalculator.calculateGranularPain(parsed.data);
+            setPainScores(scores);
+            setError('Using recent cached atmospheric readings while reconnecting to station...');
+            return;
+          }
+        } catch {}
+      }
+
+      setError('Atmospheric telemetry temporarily reconnecting. Please check connection or tap Try Again.');
     } finally {
       if (!isBackground) {
         setLoading(false);

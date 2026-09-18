@@ -1,5 +1,5 @@
 // Universal Client-Side Voice and Audio Service
-// Combines high-reliability server-side MP3 streaming (/api/tts) with Web Speech and Web Audio fallbacks
+// Combines high-reliability server-side MP3 streaming (/api/tts), Web Audio API buffer playback, and Web Speech fallbacks
 import { WeatherMetrics, PainScores } from '../types';
 
 export interface VoiceState {
@@ -18,10 +18,10 @@ class VoiceService {
   private activeSentence = '';
   private currentAudioUrl: string | null = null;
   private currentUtterance: SpeechSynthesisUtterance | null = null;
-  private keepAliveInterval: any = null;
   private rate = 0.9; // Friendly, clear pacing for seniors
   private volume = 1.0;
   private audioContext: AudioContext | null = null;
+  private activeSourceNode: AudioBufferSourceNode | null = null;
   private internalAudio: HTMLAudioElement | null = null;
   private attachedElement: HTMLAudioElement | null = null;
   private currentSentences: string[] = [];
@@ -42,6 +42,34 @@ class VoiceService {
           }
         } catch {}
       }
+
+      // Pre-create AudioContext on first user interaction anywhere in the window
+      const unlockListener = () => {
+        this.unlockAudio();
+        window.removeEventListener('click', unlockListener);
+        window.removeEventListener('touchstart', unlockListener);
+      };
+      window.addEventListener('click', unlockListener, { passive: true, once: true });
+      window.addEventListener('touchstart', unlockListener, { passive: true, once: true });
+    }
+  }
+
+  // Synchronously unlock and return the browser's AudioContext
+  public unlockAudio(): AudioContext | null {
+    if (typeof window === 'undefined') return null;
+    try {
+      if (!this.audioContext) {
+        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+        if (AudioCtx) {
+          this.audioContext = new AudioCtx();
+        }
+      }
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
+      return this.audioContext;
+    } catch {
+      return null;
     }
   }
 
@@ -74,83 +102,67 @@ class VoiceService {
     }
   }
 
-  // Retrieve or initialize standard AudioContext with user-gesture unlock
-  private async getAudioContext(): Promise<AudioContext | null> {
-    if (typeof window === 'undefined') return null;
-    try {
-      if (!this.audioContext) {
-        const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-        if (AudioCtx) {
-          this.audioContext = new AudioCtx();
-        }
-      }
-      if (this.audioContext && this.audioContext.state === 'suspended') {
-        await this.audioContext.resume();
-      }
-      return this.audioContext;
-    } catch {
-      return null;
-    }
-  }
-
   // 100% Guaranteed Sound: Play an audible melodic chime directly from Web Audio API
-  public async playTestChime(): Promise<void> {
+  public playTestChime(): void {
+    const ctx = this.unlockAudio();
+
+    if (ctx) {
+      const now = ctx.currentTime;
+      // 3-note ascending cheerful chime with triangle wave (warm, rich, highly audible on all speakers)
+      // Notes: G4 (392Hz) -> C5 (523Hz) -> G5 (784Hz)
+      const notes = [
+        { freq: 392.0, time: 0, dur: 0.22 },
+        { freq: 523.25, time: 0.16, dur: 0.22 },
+        { freq: 783.99, time: 0.32, dur: 0.5 },
+      ];
+
+      notes.forEach(({ freq, time, dur }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(freq, now + time);
+
+        gain.gain.setValueAtTime(0.001, now + time);
+        gain.gain.linearRampToValueAtTime(0.85 * this.volume, now + time + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + time + dur);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start(now + time);
+        osc.stop(now + time + dur);
+      });
+    }
+
+    // Simultaneously trigger spoken confirmation through audio element synchronously
     try {
-      const ctx = await this.getAudioContext();
-      if (ctx) {
-        const now = ctx.currentTime;
-        // 3-note ascending cheerful chime: C5 (523Hz) -> E5 (659Hz) -> G5 (784Hz)
-        const notes = [
-          { freq: 523.25, time: 0, dur: 0.25 },
-          { freq: 659.25, time: 0.18, dur: 0.25 },
-          { freq: 783.99, time: 0.36, dur: 0.5 },
-        ];
-
-        notes.forEach(({ freq, time, dur }) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-
-          osc.type = 'sine';
-          osc.frequency.setValueAtTime(freq, now + time);
-
-          gain.gain.setValueAtTime(0.001, now + time);
-          gain.gain.linearRampToValueAtTime(0.25 * this.volume, now + time + 0.04);
-          gain.gain.exponentialRampToValueAtTime(0.001, now + time + dur);
-
-          osc.connect(gain);
-          gain.connect(ctx.destination);
-
-          osc.start(now + time);
-          osc.stop(now + time + dur);
-        });
-      }
-
-      // Also speak a short confirmation sentence through the audio player
-      await new Promise((resolve) => setTimeout(resolve, 600));
       const testAudioUrl = `/api/tts?text=${encodeURIComponent('Testing speakers. Sound is working loud and clear.')}`;
       const testAudio = new Audio(testAudioUrl);
       testAudio.volume = this.volume;
       testAudio.playbackRate = 1.0;
-      await testAudio.play().catch(() => {});
-    } catch (err) {
-      console.warn('Test chime error:', err);
+      testAudio.play().catch((err) => {
+        console.warn('[VoiceService] Test audio play error:', err);
+      });
+    } catch (e) {
+      console.warn('[VoiceService] Could not play test audio element:', e);
     }
   }
 
-  // Quick soft activation click/chime on button tap
-  public async playActivationChime() {
+  // Quick soft activation chime on button tap
+  public playActivationChime() {
+    const ctx = this.unlockAudio();
+    if (!ctx) return;
     try {
-      const ctx = await this.getAudioContext();
-      if (!ctx) return;
       const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
 
-      osc.type = 'sine';
+      osc.type = 'triangle';
       osc.frequency.setValueAtTime(587.33, now); // D5
       osc.frequency.exponentialRampToValueAtTime(880, now + 0.12); // A5
 
-      gain.gain.setValueAtTime(0.12 * this.volume, now);
+      gain.gain.setValueAtTime(0.4 * this.volume, now);
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
 
       osc.connect(gain);
@@ -214,9 +226,13 @@ class VoiceService {
       this.sentenceInterval = null;
     }
 
-    if (this.keepAliveInterval) {
-      clearInterval(this.keepAliveInterval);
-      this.keepAliveInterval = null;
+    // Stop active Web Audio buffer source if running
+    if (this.activeSourceNode) {
+      try {
+        this.activeSourceNode.stop();
+        this.activeSourceNode.disconnect();
+      } catch {}
+      this.activeSourceNode = null;
     }
 
     // Stop attached DOM audio element
@@ -262,12 +278,13 @@ class VoiceService {
       .filter((s) => s.length > 0);
   }
 
-  // Primary Speech Engine: Streams natural voice audio from /api/tts with full browser compatibility
-  public speak(fullText: string, onEnd?: () => void): void {
+  // Primary Speech Engine: Streams natural voice audio from /api/tts with multi-layer browser fallback
+  public async speak(fullText: string, onEnd?: () => void): Promise<void> {
     if (!fullText || !fullText.trim()) return;
 
-    // Stop prior audio and play activation chime
+    // Stop prior audio and play immediate activation chime
     this.stop();
+    this.unlockAudio();
     this.playActivationChime();
 
     const sentences = this.splitSentences(fullText);
@@ -279,26 +296,21 @@ class VoiceService {
     this.isSpeaking = true;
     this.notify();
 
-    // Prefer playing through the attached DOM audio element so the player shows real progress
-    const player = this.attachedElement || this.getOrCreateInternalAudio();
-    if (player) {
-      // Only change src if different or not set
-      if (!player.src || !player.src.endsWith(encodeURIComponent(fullText))) {
-        player.src = ttsUrl;
-      }
-      player.playbackRate = this.rate;
-      player.volume = this.volume;
+    let playbackStarted = false;
 
-      // Track active sentence progression during playback
-      let sentenceIndex = 0;
+    // Track active sentence progression
+    let sentenceIndex = 0;
+    const startSentenceTracking = (getDuration: () => number, getCurrentTime: () => number) => {
       if (this.sentenceInterval) clearInterval(this.sentenceInterval);
       this.sentenceInterval = setInterval(() => {
-        if (!player || player.paused || player.ended) {
+        if (!this.isSpeaking) {
           clearInterval(this.sentenceInterval);
           return;
         }
-        if (player.duration && sentences.length > 0) {
-          const progress = player.currentTime / player.duration;
+        const duration = getDuration();
+        const currentTime = getCurrentTime();
+        if (duration > 0 && sentences.length > 0) {
+          const progress = Math.min(1, currentTime / duration);
           const targetIndex = Math.min(
             sentences.length - 1,
             Math.floor(progress * sentences.length)
@@ -309,7 +321,29 @@ class VoiceService {
             this.notify();
           }
         }
-      }, 400);
+      }, 300);
+    };
+
+    // Strategy 1: HTML5 Audio Element playback (direct stream)
+    try {
+      const player = this.getOrCreateInternalAudio();
+      player.src = ttsUrl;
+      player.playbackRate = this.rate;
+      player.volume = this.volume;
+
+      // Sync attached element if available
+      if (this.attachedElement) {
+        try {
+          this.attachedElement.src = ttsUrl;
+          this.attachedElement.playbackRate = this.rate;
+          this.attachedElement.volume = this.volume;
+        } catch {}
+      }
+
+      startSentenceTracking(
+        () => player.duration || 20,
+        () => player.currentTime || 0
+      );
 
       player.onended = () => {
         this.stop();
@@ -318,12 +352,56 @@ class VoiceService {
 
       const playPromise = player.play();
       if (playPromise !== undefined) {
-        playPromise.catch((err) => {
-          console.warn('[VoiceService] HTML5 audio play failed, falling back to Web Speech:', err);
-          this.fallbackSpeechSynthesis(fullText, onEnd);
-        });
+        await playPromise;
+        playbackStarted = true;
       }
-    } else {
+    } catch (err) {
+      console.warn('[VoiceService] HTML5 audio playback failed, trying Web Audio API buffer:', err);
+    }
+
+    // Strategy 2: Web Audio API Buffer Decoding (bypasses iframe media element restrictions)
+    if (!playbackStarted) {
+      const ctx = this.unlockAudio();
+      if (ctx) {
+        try {
+          const response = await fetch(ttsUrl);
+          const arrayBuffer = await response.arrayBuffer();
+          const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.playbackRate.value = this.rate;
+
+          const gainNode = ctx.createGain();
+          gainNode.gain.value = this.volume;
+
+          source.connect(gainNode);
+          gainNode.connect(ctx.destination);
+
+          const startTime = ctx.currentTime;
+          const duration = audioBuffer.duration / this.rate;
+
+          startSentenceTracking(
+            () => duration,
+            () => ctx.currentTime - startTime
+          );
+
+          source.onended = () => {
+            this.stop();
+            if (onEnd) onEnd();
+          };
+
+          source.start(0);
+          this.activeSourceNode = source;
+          playbackStarted = true;
+        } catch (webAudioErr) {
+          console.warn('[VoiceService] Web Audio buffer decoding failed:', webAudioErr);
+        }
+      }
+    }
+
+    // Strategy 3: Web Speech API fallback
+    if (!playbackStarted) {
       this.fallbackSpeechSynthesis(fullText, onEnd);
     }
   }
@@ -338,10 +416,9 @@ class VoiceService {
   // Fallback engine: Web Speech API (used if offline or server stream unavailable)
   private fallbackSpeechSynthesis(fullText: string, onEnd?: () => void) {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      this.playTestChime().then(() => {
-        this.stop();
-        if (onEnd) onEnd();
-      });
+      this.playTestChime();
+      this.stop();
+      if (onEnd) onEnd();
       return;
     }
 

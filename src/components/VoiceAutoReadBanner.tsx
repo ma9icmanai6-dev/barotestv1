@@ -10,6 +10,7 @@ import {
   FileText,
   ChevronDown,
   ChevronUp,
+  ExternalLink,
 } from 'lucide-react';
 import { voiceService, VoiceState } from '../services/voiceService';
 
@@ -35,7 +36,17 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
   const [volume, setVolume] = useState<number>(1.0);
   const [isTestingSound, setIsTestingSound] = useState<boolean>(false);
   const [showTranscript, setShowTranscript] = useState<boolean>(false);
+  const [isIframe, setIsIframe] = useState<boolean>(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Check if running inside an iframe (like AI Studio preview)
+  useEffect(() => {
+    try {
+      setIsIframe(window.self !== window.top);
+    } catch {
+      setIsIframe(true);
+    }
+  }, []);
 
   // Subscribe to real-time voice updates and attach audio element
   useEffect(() => {
@@ -53,11 +64,23 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
     };
   }, []);
 
-  // One-click sound test: plays an audible chime using Web Audio API
-  const handleTestSpeaker = async () => {
+  // Update audio source safely without interrupting in-flight playback
+  useEffect(() => {
+    const el = audioRef.current;
+    if (el && audioUrl) {
+      if (!el.src || !el.src.includes('/api/tts')) {
+        el.src = audioUrl;
+      }
+    }
+  }, [audioUrl]);
+
+  // One-click sound test: plays an audible chime using Web Audio API synchronously
+  const handleTestSpeaker = () => {
     setIsTestingSound(true);
-    await voiceService.playTestChime();
-    setIsTestingSound(false);
+    voiceService.playTestChime();
+    setTimeout(() => {
+      setIsTestingSound(false);
+    }, 1500);
   };
 
   const handleRateChange = (newRate: number) => {
@@ -72,6 +95,9 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
       audioRef.current.volume = newVol;
     }
   };
+
+  const directStreamUrl =
+    audioUrl || (forecastScript ? `/api/tts?text=${encodeURIComponent(forecastScript)}` : null);
 
   return (
     <div
@@ -99,6 +125,17 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
               <span className="text-xs font-bold text-slate-700 bg-white px-2.5 py-1 rounded-lg border border-slate-200 shadow-2xs">
                 📍 {locationName}
               </span>
+              {/* Sound Active Indicator */}
+              {isSpeaking && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-200 text-amber-900">
+                  <span className="flex items-end gap-0.5 h-3">
+                    <span className="w-1 bg-amber-700 rounded-full animate-bounce h-3" />
+                    <span className="w-1 bg-amber-700 rounded-full animate-bounce h-2" />
+                    <span className="w-1 bg-amber-700 rounded-full animate-bounce h-3" />
+                  </span>
+                  Playing Audio
+                </span>
+              )}
             </div>
             <p className="text-base sm:text-lg font-bold text-slate-900 mt-1">
               {isSpeaking ? (
@@ -136,12 +173,12 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
             </button>
           )}
 
-          {/* Test Speaker Button (Guaranteed Sound via Web Audio API) */}
+          {/* Test Speaker Button (Guaranteed Sound via Web Audio API Chime + Speech) */}
           <button
             id="btn-test-speaker"
             onClick={handleTestSpeaker}
             disabled={isTestingSound}
-            title="Play an audible chime to test if your computer or phone speakers are working"
+            title="Play an audible melodic chime and voice test to check speakers"
             className="px-4 py-3 rounded-2xl bg-white hover:bg-slate-50 border-2 border-emerald-300 text-emerald-900 font-bold text-sm shadow-2xs transition flex items-center justify-center gap-2 cursor-pointer active:scale-95 shrink-0"
           >
             <BellRing className={`w-4 h-4 text-emerald-600 ${isTestingSound ? 'animate-bounce' : ''}`} />
@@ -161,14 +198,13 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
             id="forecast-audio-player"
             ref={audioRef}
             controls
-            preload="metadata"
-            src={audioUrl || (forecastScript ? `/api/tts?text=${encodeURIComponent(forecastScript)}` : undefined)}
+            preload="auto"
             className="w-full h-10 accent-emerald-600 rounded-lg"
           />
         </div>
 
         {/* Speed & Volume Sliders for Seniors */}
-        <div className="flex items-center gap-4 flex-wrap sm:flex-nowrap justify-between sm:justify-end shrink-0 text-sm">
+        <div className="flex items-center gap-3 flex-wrap sm:flex-nowrap justify-between sm:justify-end shrink-0 text-sm">
           {/* Speed Presets */}
           <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
             <Gauge className="w-4 h-4 text-slate-500 ml-1.5" />
@@ -233,6 +269,44 @@ export const VoiceAutoReadBanner: React.FC<VoiceAutoReadBannerProps> = ({
               <ChevronDown className="w-3.5 h-3.5" />
             )}
           </button>
+        </div>
+      </div>
+
+      {/* Helper Bar: If running in iframe, offer Open in New Tab for 100% audio permission */}
+      <div className="mt-2.5 flex items-center justify-between flex-wrap gap-2 text-xs font-medium text-slate-600 px-1">
+        <div className="flex items-center gap-2">
+          <span>💡 <strong>Audio Tip:</strong> Make sure computer volume is unmuted.</span>
+          {isIframe && (
+            <span className="text-emerald-800 font-semibold bg-emerald-100/80 px-2 py-0.5 rounded-md">
+              Preview Mode Active
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          {directStreamUrl && (
+            <a
+              id="btn-direct-audio-link"
+              href={directStreamUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-emerald-700 hover:text-emerald-800 underline font-bold"
+              title="Open audio file directly in browser player"
+            >
+              <ExternalLink className="w-3 h-3" />
+              Listen in New Tab
+            </a>
+          )}
+          <a
+            id="btn-open-full-tab-audio"
+            href={typeof window !== 'undefined' ? window.location.href : '#'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition shadow-2xs"
+            title="Open in full browser window without iframe restrictions"
+          >
+            <ExternalLink className="w-3 h-3" />
+            Open Full Window
+          </a>
         </div>
       </div>
 
