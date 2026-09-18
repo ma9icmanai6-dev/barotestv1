@@ -270,6 +270,7 @@ export default function App() {
     if (isSpeaking) {
       voiceService.stop();
     } else if (weather) {
+      voiceService.unlockAudio();
       const script = voiceService.generateForecastText(currentLocation.name, weather, painScores);
       voiceService.speak(script);
     }

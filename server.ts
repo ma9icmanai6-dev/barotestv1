@@ -704,6 +704,57 @@ app.all('/api/tts', async (req: Request, res: Response) => {
   }
 });
 
+// API 4.6: Real hardware audio calibration tone and chime (Standard PCM WAV)
+app.get('/api/sound-check.wav', (req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Content-Type', 'audio/wav');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
+
+  const sampleRate = 44100;
+  const duration = 1.3;
+  const numSamples = Math.floor(sampleRate * duration);
+  const buffer = Buffer.alloc(44 + numSamples * 2);
+
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + numSamples * 2, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20); // PCM
+  buffer.writeUInt16LE(1, 22); // mono
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * 2, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(numSamples * 2, 40);
+
+  // 4 notes: C5 (523Hz), E5 (659Hz), G5 (784Hz), C6 (1046Hz)
+  const notes = [
+    { freq: 523.25, start: 0.0 },
+    { freq: 659.25, start: 0.2 },
+    { freq: 783.99, start: 0.4 },
+    { freq: 1046.5, start: 0.65 },
+  ];
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    let sample = 0;
+    notes.forEach((n) => {
+      if (t >= n.start) {
+        const noteT = t - n.start;
+        const env = Math.exp(-noteT * 4.5);
+        sample += Math.sin(2 * Math.PI * n.freq * noteT) * env * 0.4;
+      }
+    });
+    const clamped = Math.max(-1, Math.min(1, sample));
+    buffer.writeInt16LE(Math.floor(clamped * 32767), 44 + i * 2);
+  }
+
+  res.setHeader('Content-Length', buffer.length);
+  return res.send(buffer);
+});
+
 // API 5: Gemini AI Correlation Analysis
 app.post('/api/gemini/analyze-correlation', async (req: Request, res: Response) => {
   try {
