@@ -627,6 +627,14 @@ const ttsCache = new Map<string, Buffer>();
 
 // API 4.5: High-reliability Server-side Text-to-Speech audio streaming
 app.all('/api/tts', async (req: Request, res: Response) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   try {
     const rawText = (req.method === 'POST' ? req.body?.text : req.query?.text) as string;
     const text = (rawText || '').trim();

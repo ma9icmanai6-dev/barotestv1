@@ -8,6 +8,10 @@ export interface VoiceState {
   audioUrl: string | null;
   rate: number;
   volume: number;
+  activeEngine: 'idle' | 'html5_mp3' | 'webaudio_mp3' | 'web_speech' | 'synth_chime';
+  audioContextState: string;
+  lastError: string | null;
+  debugLogs: string[];
 }
 
 export type VoiceStateListener = (state: VoiceState) => void;
@@ -26,8 +30,12 @@ class VoiceService {
   private attachedElement: HTMLAudioElement | null = null;
   private currentSentences: string[] = [];
   private sentenceInterval: any = null;
+  private activeEngine: 'idle' | 'html5_mp3' | 'webaudio_mp3' | 'web_speech' | 'synth_chime' = 'idle';
+  private lastError: string | null = null;
+  private debugLogs: string[] = [];
 
   constructor() {
+    this.addLog('Audio service initialized.');
     if (typeof window !== 'undefined') {
       // Warm up Web Speech voices in background if supported
       if ('speechSynthesis' in window) {
@@ -36,22 +44,37 @@ class VoiceService {
           if (window.speechSynthesis.onvoiceschanged !== undefined) {
             window.speechSynthesis.onvoiceschanged = () => {
               try {
-                window.speechSynthesis.getVoices();
+                const count = window.speechSynthesis.getVoices().length;
+                this.addLog(`System voices ready (${count} voices available).`);
               } catch {}
             };
           }
         } catch {}
       }
 
-      // Pre-create AudioContext on first user interaction anywhere in the window
+      // Pre-create and unlock AudioContext on first user interaction anywhere in window
       const unlockListener = () => {
         this.unlockAudio();
+        this.addLog('Browser audio unlocked on user gesture.');
         window.removeEventListener('click', unlockListener);
         window.removeEventListener('touchstart', unlockListener);
+        window.removeEventListener('keydown', unlockListener);
       };
       window.addEventListener('click', unlockListener, { passive: true, once: true });
       window.addEventListener('touchstart', unlockListener, { passive: true, once: true });
+      window.addEventListener('keydown', unlockListener, { passive: true, once: true });
     }
+  }
+
+  public addLog(msg: string) {
+    const time = new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const line = `[${time}] ${msg}`;
+    this.debugLogs = [line, ...this.debugLogs.slice(0, 19)];
+    this.notify();
+  }
+
+  public getDebugLogs(): string[] {
+    return this.debugLogs;
   }
 
   // Synchronously unlock and return the browser's AudioContext
@@ -62,13 +85,19 @@ class VoiceService {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioCtx) {
           this.audioContext = new AudioCtx();
+          this.addLog(`AudioContext created (sampleRate: ${this.audioContext.sampleRate}Hz, state: ${this.audioContext.state})`);
         }
       }
       if (this.audioContext && this.audioContext.state === 'suspended') {
-        this.audioContext.resume().catch(() => {});
+        this.audioContext.resume().then(() => {
+          this.addLog('AudioContext state changed to: running');
+        }).catch((err) => {
+          this.addLog(`AudioContext resume rejected: ${err?.message || err}`);
+        });
       }
       return this.audioContext;
-    } catch {
+    } catch (e: any) {
+      this.addLog(`AudioContext error: ${e?.message || e}`);
       return null;
     }
   }
@@ -104,9 +133,13 @@ class VoiceService {
 
   // 100% Guaranteed Sound: Play an audible melodic chime directly from Web Audio API
   public playTestChime(): void {
+    this.addLog('🔔 Testing Speaker: Generating audible chime...');
     const ctx = this.unlockAudio();
 
     if (ctx) {
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
       const now = ctx.currentTime;
       // 3-note ascending cheerful chime with triangle wave (warm, rich, highly audible on all speakers)
       // Notes: G4 (392Hz) -> C5 (523Hz) -> G5 (784Hz)
@@ -133,6 +166,9 @@ class VoiceService {
         osc.start(now + time);
         osc.stop(now + time + dur);
       });
+      this.addLog('Chime generated successfully on audio output.');
+    } else {
+      this.addLog('AudioContext unavailable for chime.');
     }
 
     // Simultaneously trigger spoken confirmation through audio element synchronously
@@ -141,11 +177,13 @@ class VoiceService {
       const testAudio = new Audio(testAudioUrl);
       testAudio.volume = this.volume;
       testAudio.playbackRate = 1.0;
-      testAudio.play().catch((err) => {
-        console.warn('[VoiceService] Test audio play error:', err);
+      testAudio.play().then(() => {
+        this.addLog('Spoken test audio played successfully.');
+      }).catch((err) => {
+        this.addLog(`Spoken test audio blocked: ${err?.message || err}`);
       });
-    } catch (e) {
-      console.warn('[VoiceService] Could not play test audio element:', e);
+    } catch (e: any) {
+      this.addLog(`Spoken test audio error: ${e?.message || e}`);
     }
   }
 
@@ -154,6 +192,9 @@ class VoiceService {
     const ctx = this.unlockAudio();
     if (!ctx) return;
     try {
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {});
+      }
       const now = ctx.currentTime;
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
@@ -181,6 +222,10 @@ class VoiceService {
       audioUrl: this.currentAudioUrl,
       rate: this.rate,
       volume: this.volume,
+      activeEngine: this.activeEngine,
+      audioContextState: this.audioContext?.state || 'not-initialized',
+      lastError: this.lastError,
+      debugLogs: [...this.debugLogs],
     });
     return () => {
       this.listeners.delete(listener);
@@ -194,6 +239,10 @@ class VoiceService {
       audioUrl: this.currentAudioUrl,
       rate: this.rate,
       volume: this.volume,
+      activeEngine: this.activeEngine,
+      audioContextState: this.audioContext?.state || 'not-initialized',
+      lastError: this.lastError,
+      debugLogs: [...this.debugLogs],
     };
     this.listeners.forEach((l) => l(state));
   }
@@ -259,8 +308,10 @@ class VoiceService {
     }
 
     this.isSpeaking = false;
+    this.activeEngine = 'idle';
     this.activeSentence = '';
     this.currentUtterance = null;
+    this.addLog('Playback stopped.');
     this.notify();
   }
 
@@ -284,7 +335,7 @@ class VoiceService {
 
     // Stop prior audio and play immediate activation chime
     this.stop();
-    this.unlockAudio();
+    const ctx = this.unlockAudio();
     this.playActivationChime();
 
     const sentences = this.splitSentences(fullText);
@@ -294,6 +345,8 @@ class VoiceService {
     const ttsUrl = `/api/tts?text=${encodeURIComponent(fullText)}`;
     this.currentAudioUrl = ttsUrl;
     this.isSpeaking = true;
+    this.lastError = null;
+    this.addLog(`Starting voice playback (${sentences.length} sentences)...`);
     this.notify();
 
     let playbackStarted = false;
@@ -324,8 +377,9 @@ class VoiceService {
       }, 300);
     };
 
-    // Strategy 1: HTML5 Audio Element playback (direct stream)
+    // Strategy 1: HTML5 Audio Element playback (direct MP3 stream)
     try {
+      this.addLog('Attempting Strategy 1: HTML5 Audio direct streaming...');
       const player = this.getOrCreateInternalAudio();
       player.src = ttsUrl;
       player.playbackRate = this.rate;
@@ -346,6 +400,7 @@ class VoiceService {
       );
 
       player.onended = () => {
+        this.addLog('HTML5 Audio playback completed.');
         this.stop();
         if (onEnd) onEnd();
       };
@@ -354,17 +409,27 @@ class VoiceService {
       if (playPromise !== undefined) {
         await playPromise;
         playbackStarted = true;
+        this.activeEngine = 'html5_mp3';
+        this.addLog('Strategy 1 successful: HTML5 Audio playing MP3.');
+        this.notify();
       }
-    } catch (err) {
-      console.warn('[VoiceService] HTML5 audio playback failed, trying Web Audio API buffer:', err);
+    } catch (err: any) {
+      this.addLog(`Strategy 1 (HTML5 Audio) blocked or failed: ${err?.message || err}`);
+      console.warn('[VoiceService] HTML5 audio playback failed, falling back:', err);
     }
 
     // Strategy 2: Web Audio API Buffer Decoding (bypasses iframe media element restrictions)
     if (!playbackStarted) {
-      const ctx = this.unlockAudio();
+      this.addLog('Attempting Strategy 2: Web Audio API Buffer fetch & decode...');
       if (ctx) {
         try {
+          if (ctx.state === 'suspended') {
+            await ctx.resume();
+          }
           const response = await fetch(ttsUrl);
+          if (!response.ok) {
+            throw new Error(`TTS server HTTP ${response.status}`);
+          }
           const arrayBuffer = await response.arrayBuffer();
           const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
 
@@ -387,6 +452,7 @@ class VoiceService {
           );
 
           source.onended = () => {
+            this.addLog('Web Audio Buffer playback completed.');
             this.stop();
             if (onEnd) onEnd();
           };
@@ -394,15 +460,37 @@ class VoiceService {
           source.start(0);
           this.activeSourceNode = source;
           playbackStarted = true;
-        } catch (webAudioErr) {
+          this.activeEngine = 'webaudio_mp3';
+          this.addLog(`Strategy 2 successful: Web Audio buffer decoded (${audioBuffer.duration.toFixed(1)}s).`);
+          this.notify();
+        } catch (webAudioErr: any) {
+          this.addLog(`Strategy 2 (Web Audio) failed: ${webAudioErr?.message || webAudioErr}`);
           console.warn('[VoiceService] Web Audio buffer decoding failed:', webAudioErr);
         }
+      } else {
+        this.addLog('Strategy 2 skipped: AudioContext unavailable.');
       }
     }
 
-    // Strategy 3: Web Speech API fallback
+    // Strategy 3: Web Speech API fallback (local browser speech synthesis)
     if (!playbackStarted) {
-      this.fallbackSpeechSynthesis(fullText, onEnd);
+      this.addLog('Attempting Strategy 3: Web Speech API synthesis...');
+      const speechStarted = this.fallbackSpeechSynthesis(fullText, onEnd);
+      if (speechStarted) {
+        playbackStarted = true;
+        this.activeEngine = 'web_speech';
+        this.notify();
+      }
+    }
+
+    // Strategy 4: Web Audio Synth Sound Alert (guaranteed audible tones so user ALWAYS gets audio feedback)
+    if (!playbackStarted) {
+      this.activeEngine = 'synth_chime';
+      this.lastError = 'Audio playback was restricted by browser autoplay policy. Tap Test Speaker or unmute.';
+      this.addLog('Falling back to Strategy 4: Web Audio Synth Melody.');
+      this.playTestChime();
+      this.stop();
+      if (onEnd) onEnd();
     }
   }
 
@@ -414,12 +502,10 @@ class VoiceService {
   }
 
   // Fallback engine: Web Speech API (used if offline or server stream unavailable)
-  private fallbackSpeechSynthesis(fullText: string, onEnd?: () => void) {
+  private fallbackSpeechSynthesis(fullText: string, onEnd?: () => void): boolean {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      this.playTestChime();
-      this.stop();
-      if (onEnd) onEnd();
-      return;
+      this.addLog('Web Speech API is not supported in this browser.');
+      return false;
     }
 
     try {
@@ -434,6 +520,7 @@ class VoiceService {
       if (!this.isSpeaking) return;
 
       if (currentIndex >= sentences.length) {
+        this.addLog('Web Speech reading completed.');
         this.stop();
         if (onEnd) onEnd();
         return;
@@ -453,7 +540,7 @@ class VoiceService {
       const voices = window.speechSynthesis.getVoices();
       if (voices && voices.length > 0) {
         const preferredVoice =
-          voices.find((v) => v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Samantha'))) ||
+          voices.find((v) => v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex'))) ||
           voices.find((v) => v.lang.startsWith('en')) ||
           voices[0];
         if (preferredVoice) {
@@ -465,12 +552,17 @@ class VoiceService {
       utterance.pitch = 1.0;
       utterance.volume = this.volume;
 
+      utterance.onstart = () => {
+        this.addLog(`Web Speech speaking sentence ${currentIndex + 1}/${sentences.length}`);
+      };
+
       utterance.onend = () => {
         currentIndex++;
         speakNextSentence();
       };
 
-      utterance.onerror = () => {
+      utterance.onerror = (evt) => {
+        this.addLog(`Web Speech error on sentence ${currentIndex + 1}: ${evt.error}`);
         currentIndex++;
         if (currentIndex < sentences.length && this.isSpeaking) {
           speakNextSentence();
@@ -482,12 +574,14 @@ class VoiceService {
 
       try {
         window.speechSynthesis.speak(utterance);
-      } catch {
+      } catch (err: any) {
+        this.addLog(`Speech synthesis speak() failed: ${err?.message || err}`);
         this.stop();
       }
     };
 
     speakNextSentence();
+    return true;
   }
 
   // Generate clear conversational forecast script for today
